@@ -444,6 +444,19 @@ public:
 				BOOST_THROW_EXCEPTION(BadArgument());
 			}
 		}
+		//API-nicehash
+ 		else if ((arg == "--api-port") && i + 1 < argc)
+ 		{
+ 			try
+ 			{
+ 				m_apiPort = stol(argv[++i]);
+ 			}
+ 			catch (...)
+ 			{
+ 				cerr << "Bad " << arg << " option: " << argv[i] << endl;
+ 				BOOST_THROW_EXCEPTION(BadArgument());
+ 			}
+ 		}
 		else
 			return false;
 		return true;
@@ -592,6 +605,7 @@ public:
 			<< "    --cuda-devices <0 1 ..n> Select which CUDA GPUs to mine on. Default is to use all" << endl
 			<< "    --cuda-parallel-hash <1 2 ..8> Define how many hashes to calculate in a kernel, can be scaled to achive better performance. Default=4" << endl
 #endif
+			<< "    --api-port  Set port for API (default = 0; no API)" << endl
 			;
 	}
 
@@ -892,6 +906,33 @@ private:
 			}
 		exit(0);
 	}
+	//API-nicehash
+	// return values:
+	// 0 - nothing
+	// 1 - stop mining
+	// 2 - start mining
+	// 3 - send speed
+	static int readAPICommand(boost::asio::ip::udp::socket* api_socket, boost::asio::ip::udp::endpoint& remote_endpoint)
+	{
+		if (api_socket == nullptr) return 0;
+
+		try
+		{
+			boost::array<char, 16> recv_buf;
+			boost::system::error_code error;
+			size_t s = api_socket->receive_from(boost::asio::buffer(recv_buf), remote_endpoint, 0, error);
+			if (error && error != boost::asio::error::would_block)
+				throw boost::system::system_error(error);
+			if (s < 1) return 0;
+			//std::cout << "API received " << s << std::endl;
+			return (int)recv_buf.at(0);
+		}
+		catch (std::exception& e)
+		{
+			std::cerr << "API error: " << e.what() << std::endl;
+			return 0;
+		}
+	}
 
 #if ETH_STRATUM
 	void doStratum()
@@ -908,6 +949,51 @@ private:
 
 		Farm f;
 
+		//API-init-nicehash
+		boost::asio::io_service m_io_service;
+		boost::asio::ip::udp::socket* api_socket = nullptr;
+		boost::asio::ip::udp::endpoint remote_endpoint;
+
+		if (m_apiPort > 0)
+		{
+			try
+			{
+				boost::asio::ip::udp::endpoint endpoint(boost::asio::ip::address_v4(0x7f000001), m_apiPort);
+				api_socket = new boost::asio::ip::udp::socket(m_io_service, endpoint);
+				boost::asio::socket_base::non_blocking_io nb(true);
+				api_socket->io_control(nb);
+				minelog << "API port " << m_apiPort << " bound";
+			}
+			catch (std::exception& e)
+			{
+				std::cerr << "Unable to init API port, reason: " << e.what() << std::endl;
+				api_socket = nullptr;
+			}
+		}
+
+		bool doMining = true;
+		//API-init-nicehash
+		while (true)
+		{
+			while (!doMining)
+			{
+				int cmd = readAPICommand(api_socket, remote_endpoint);
+				if (cmd > 0)
+				{
+					//std::cout << "Received command: " << cmd << std::endl;
+					if (cmd == 2)
+					{
+						doMining = true;
+						break;
+					}
+					else if (cmd == 3)
+					{
+						double spd = -1;
+						api_socket->send_to(boost::asio::buffer((void*)&spd, sizeof(spd)), remote_endpoint);
+					}
+				}
+				this_thread::sleep_for(chrono::milliseconds(2));
+			}
 		// this is very ugly, but if Stratum Client V2 tunrs out to be a success, V1 will be completely removed anyway
 		if (m_stratumClientVersion == 1) {
 			EthStratumClient client(&f, m_minerType, m_farmURL, m_port, m_user, m_pass, m_maxFarmRetries, m_worktimeout, m_stratumProtocol, m_email);
@@ -935,7 +1021,7 @@ private:
 				return false;
 			});
 
-			while (client.isRunning())
+			while (doMining &&client.isRunning())
 			{
 				auto mp = f.miningProgress();
 				f.resetMiningProgress();
@@ -950,7 +1036,31 @@ private:
 						minelog << "Waiting for work package...";
 					}
 				}
-				this_thread::sleep_for(chrono::milliseconds(m_farmRecheckPeriod));
+				//this_thread::sleep_for(chrono::milliseconds(m_farmRecheckPeriod));
+				std::chrono::steady_clock::time_point tp = std::chrono::steady_clock::now();
+				while (true)
+				{
+					int cmd = readAPICommand(api_socket, remote_endpoint);
+					if (cmd > 0)
+					{
+						//std::cout << "Received command: " << cmd << std::endl;
+						if (cmd == 1)
+						{
+							doMining = false;
+							break;
+						}
+						else if (cmd == 3)
+						{
+							double spd = 0;
+							if (mp.ms > 0) spd = (double)mp.hashes / (mp.ms * 1000);
+							api_socket->send_to(boost::asio::buffer((void*)&spd, sizeof(spd)), remote_endpoint);
+							//std::cout << "API replied "<< std::endl;
+						}
+					}
+					if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - tp).count() < m_farmRecheckPeriod)
+						this_thread::sleep_for(chrono::milliseconds(2));
+					else break;
+				}
 			}
 		}
 		else if (m_stratumClientVersion == 2) {
@@ -974,7 +1084,7 @@ private:
 				return false;
 			});
 
-			while (client.isRunning())
+			while (doMining && lient.isRunning())
 			{
 				auto mp = f.miningProgress();
 				f.resetMiningProgress();
@@ -989,10 +1099,36 @@ private:
 						minelog << "Waiting for work package...";
 					}
 				}
-				this_thread::sleep_for(chrono::milliseconds(m_farmRecheckPeriod));
+				//this_thread::sleep_for(chrono::milliseconds(m_farmRecheckPeriod));
+				std::chrono::steady_clock::time_point tp = std::chrono::steady_clock::now();
+				while (true)
+				{
+					int cmd = readAPICommand(api_socket, remote_endpoint);
+					if (cmd > 0)
+					{
+						//std::cout << "Received command: " << cmd << std::endl;
+						if (cmd == 1)
+						{
+							doMining = false;
+							break;
+						}
+						else if (cmd == 3)
+						{
+							double spd = 0;
+							if (mp.ms > 0) spd = (double)mp.hashes / (mp.ms * 1000);
+							api_socket->send_to(boost::asio::buffer((void*)&spd, sizeof(spd)), remote_endpoint);
+							//std::cout << "API replied "<< std::endl;
+						}
+					}
+					if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - tp).count() < m_farmRecheckPeriod)
+						this_thread::sleep_for(chrono::milliseconds(2));
+					else break;
+				}
+
 			}
 		}
 
+	}// API LOOP NICEHash
 	}
 #endif
 
@@ -1037,6 +1173,9 @@ private:
 	string m_farmFailOverURL = "";
 
 
+	//API-nicehash
+	unsigned m_apiPort = 0;
+	
 	string m_activeFarmURL = m_farmURL;
 	unsigned m_farmRetries = 0;
 	unsigned m_maxFarmRetries = 3;
@@ -1047,7 +1186,7 @@ private:
 
 #if ETH_STRATUM
 	int m_stratumClientVersion = 1;
-	int m_stratumProtocol = STRATUM_PROTOCOL_STRATUM;
+	int m_stratumProtocol = STRATUM_PROTOCOL_ETHEREUMSTRATUM;
 	string m_user;
 	string m_pass;
 	string m_port;
