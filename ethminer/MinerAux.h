@@ -1084,7 +1084,7 @@ private:
 				return false;
 			});
 
-			while (doMining && lient.isRunning())
+			while (doMining && client.isRunning())
 			{
 				auto mp = f.miningProgress();
 				f.resetMiningProgress();
@@ -1175,7 +1175,7 @@ private:
 
 	//API-nicehash
 	unsigned m_apiPort = 0;
-	
+
 	string m_activeFarmURL = m_farmURL;
 	unsigned m_farmRetries = 0;
 	unsigned m_maxFarmRetries = 3;
