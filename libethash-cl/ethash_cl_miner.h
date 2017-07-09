@@ -39,7 +39,7 @@ public:
 		virtual bool searched(uint64_t start_nonce, uint32_t count) = 0;
 	};
 
-	ethash_cl_miner();
+	ethash_cl_miner() = default;
 	~ethash_cl_miner();
 
 	static bool searchForAllDevices(unsigned _platformId, std::function<bool(cl::Device const&)> _callback);
@@ -64,7 +64,7 @@ public:
 		unsigned _deviceId
 		);
 	void finish();
-	void search(uint8_t const* _header, uint64_t _target, search_hook& _hook, bool _ethStratum, uint64_t _startN);
+	void search(uint8_t const* _header, uint64_t _target, search_hook& _hook, uint64_t _startN);
 
 	/* -- default values -- */
 	/// Default value of the local work size. Also known as workgroup size.
@@ -86,7 +86,6 @@ private:
 	cl::Buffer m_header;
 	cl::Buffer m_searchBuffer[c_bufferCount];
 	unsigned m_globalWorkSize;
-	bool m_openclOnePointOne;
 
 	/// The local work size for the search
 	static unsigned s_workgroupSize;

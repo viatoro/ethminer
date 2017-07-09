@@ -38,17 +38,9 @@
 #include "ethash_cl_miner.h"
 #include "ethash_cl_miner_kernel.h"
 
-#define ETHASH_BYTES 32
-
 #define OPENCL_PLATFORM_UNKNOWN 0
 #define OPENCL_PLATFORM_NVIDIA  1
 #define OPENCL_PLATFORM_AMD		2
-
-// workaround lame platforms
-#if !CL_VERSION_1_2
-#define CL_MAP_WRITE_INVALIDATE_REGION CL_MAP_WRITE
-#define CL_MEM_HOST_READ_ONLY 0
-#endif
 
 // apple fix
 #ifndef CL_DEVICE_COMPUTE_CAPABILITY_MAJOR_NV
@@ -59,31 +51,13 @@
 #define CL_DEVICE_COMPUTE_CAPABILITY_MINOR_NV       0x4001
 #endif
 
-#undef min
-#undef max
-
 using namespace std;
 
 unsigned const ethash_cl_miner::c_defaultLocalWorkSize = 64;
 unsigned const ethash_cl_miner::c_defaultGlobalWorkSizeMultiplier = 4096; // * CL_DEFAULT_LOCAL_WORK_SIZE
 
 // TODO: If at any point we can use libdevcore in here then we should switch to using a LogChannel
-#if defined(_WIN32)
-extern "C" __declspec(dllimport) void __stdcall OutputDebugStringA(const char* lpOutputString);
-static std::atomic_flag s_logSpin = ATOMIC_FLAG_INIT;
-#define ETHCL_LOG(_contents) \
-	do \
-	{ \
-		std::stringstream ss; \
-		ss << _contents; \
-		while (s_logSpin.test_and_set(std::memory_order_acquire)) {} \
-		OutputDebugStringA(ss.str().c_str()); \
-		cerr << ss.str() << endl << flush; \
-		s_logSpin.clear(std::memory_order_release); \
-	} while (false)
-#else
-#define ETHCL_LOG(_contents) cout << "[OPENCL]:" << _contents << endl
-#endif
+#define ETHCL_LOG(_contents) std::cout << "[OpenCL] " << _contents << std::endl
 
 static void addDefinition(string& _source, char const* _id, unsigned _value)
 {
@@ -93,11 +67,6 @@ static void addDefinition(string& _source, char const* _id, unsigned _value)
 }
 
 ethash_cl_miner::search_hook::~search_hook() {}
-
-ethash_cl_miner::ethash_cl_miner()
-:	m_openclOnePointOne()
-{
-}
 
 ethash_cl_miner::~ethash_cl_miner()
 {
@@ -318,7 +287,7 @@ bool ethash_cl_miner::init(
 		_platformId = min<unsigned>(_platformId, platforms.size() - 1);
 
 		string platformName = platforms[_platformId].getInfo<CL_PLATFORM_NAME>();
-		ETHCL_LOG("Using platform: " << platformName.c_str());
+		ETHCL_LOG("Platform: " << platformName);
 
 		int platformId = OPENCL_PLATFORM_UNKNOWN;
 		if (platformName == "NVIDIA CUDA")
@@ -340,16 +309,15 @@ bool ethash_cl_miner::init(
 		// use selected device
 		cl::Device& device = devices[min<unsigned>(_deviceId, devices.size() - 1)];
 		string device_version = device.getInfo<CL_DEVICE_VERSION>();
-		ETHCL_LOG("Using device: " << device.getInfo<CL_DEVICE_NAME>().c_str() << "(" << device_version.c_str() << ")");
+		ETHCL_LOG("Device:   " << device.getInfo<CL_DEVICE_NAME>() << " / " << device_version);
 
-		if (strncmp("OpenCL 1.0", device_version.c_str(), 10) == 0)
+
+		string clVer = device_version.substr(7, 3);
+		if (clVer == "1.0" || clVer == "1.1")
 		{
-			ETHCL_LOG("OpenCL 1.0 is not supported.");
+			ETHCL_LOG("OpenCL " << clVer << " not supported - minimum required version is 1.2");
 			return false;
 		}
-		if (strncmp("OpenCL 1.1", device_version.c_str(), 10) == 0)
-			m_openclOnePointOne = true;
-
 
 		char options[256];
 		int computeCapability = 0;
@@ -477,7 +445,7 @@ typedef struct
 	unsigned buf;
 } pending_batch;
 
-void ethash_cl_miner::search(uint8_t const* header, uint64_t target, search_hook& hook, bool _ethStratum, uint64_t _startN)
+void ethash_cl_miner::search(uint8_t const* header, uint64_t target, search_hook& hook, uint64_t _startN)
 {
 	try
 	{
@@ -491,23 +459,13 @@ void ethash_cl_miner::search(uint8_t const* header, uint64_t target, search_hook
 		for (unsigned i = 0; i != c_bufferCount; ++i)
 			m_queue.enqueueWriteBuffer(m_searchBuffer[i], false, 0, 4, &c_zero);
 
-#if CL_VERSION_1_2 && 0
-		cl::Event pre_return_event;
-		if (!m_opencl_1_1)
-			m_queue.enqueueBarrierWithWaitList(NULL, &pre_return_event);
-		else
-#endif
-			m_queue.finish();
+		m_queue.finish();
 
 		// pass these to stop the compiler unrolling the loops
 		m_searchKernel.setArg(4, target);
 		
 		unsigned buf = 0;
-		random_device engine;
-		uint64_t start_nonce;
-		if (_ethStratum) start_nonce = _startN;
-		else start_nonce = uniform_int_distribution<uint64_t>()(engine);
-		for (;; start_nonce += m_globalWorkSize)
+		for (uint64_t start_nonce = _startN;; start_nonce += m_globalWorkSize)
 		{
 			// supply output buffer to kernel
 			m_searchKernel.setArg(0, m_searchBuffer[buf]);
@@ -545,12 +503,6 @@ void ethash_cl_miner::search(uint8_t const* header, uint64_t target, search_hook
 				pending.pop();
 			}
 		}
-
-		// not safe to return until this is ready
-#if CL_VERSION_1_2 && 0
-		if (!m_opencl_1_1)
-			pre_return_event.wait();
-#endif
 	}
 	catch (cl::Error const& err)
 	{
