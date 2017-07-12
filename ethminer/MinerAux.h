@@ -1181,7 +1181,7 @@ private:
 	unsigned m_maxFarmRetries = 3;
 	unsigned m_farmRecheckPeriod = 500;
 	unsigned m_defaultStratumFarmRecheckPeriod = 2000;
-	bool m_farmRecheckSet = false;
+	bool m_farmRecheckSet = true;
 	int m_worktimeout = 180;
 
 #if ETH_STRATUM
